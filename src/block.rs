@@ -523,3 +523,146 @@ impl Rect {
             .collect()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -- MergeRecord precedence rules ------------------------------------
+    //
+    // These mirror the Python original's `record_merge` semantics exactly:
+    // manual always beats auto; a "saved" value is only used as a fallback
+    // when nothing fresher is already known; a fresh manual resolution
+    // obsoletes a fresh (not-yet-saved) automatic one.
+
+    #[test]
+    fn saved_auto_is_used_when_nothing_else_known() {
+        let mut r = MergeRecord::new();
+        r.record_merge("auto1", MergeRecord::SAVED_AUTO);
+        assert_eq!(r.sha1.as_deref(), Some("auto1"));
+        assert!(!r.is_manual());
+        assert!(r.is_known());
+    }
+
+    #[test]
+    fn new_auto_overwrites_saved_auto() {
+        let mut r = MergeRecord::new();
+        r.record_merge("auto1", MergeRecord::SAVED_AUTO);
+        r.record_merge("auto2", MergeRecord::NEW_AUTO);
+        assert_eq!(r.sha1.as_deref(), Some("auto2"));
+    }
+
+    #[test]
+    fn manual_always_wins_over_auto() {
+        let mut r = MergeRecord::new();
+        r.record_merge("auto1", MergeRecord::NEW_AUTO);
+        r.record_merge("manual1", MergeRecord::NEW_MANUAL);
+        assert_eq!(r.sha1.as_deref(), Some("manual1"));
+        assert!(r.is_manual());
+
+        // A subsequent NEW_AUTO must be silently ignored once manual exists.
+        r.record_merge("auto2", MergeRecord::NEW_AUTO);
+        assert_eq!(r.sha1.as_deref(), Some("manual1"));
+    }
+
+    #[test]
+    fn saved_manual_is_fallback_until_new_manual_arrives() {
+        let mut r = MergeRecord::new();
+        r.record_merge("manual_saved", MergeRecord::SAVED_MANUAL);
+        assert_eq!(r.sha1.as_deref(), Some("manual_saved"));
+
+        r.record_merge("manual_new", MergeRecord::NEW_MANUAL);
+        assert_eq!(r.sha1.as_deref(), Some("manual_new"));
+
+        // Once a NEW_MANUAL is recorded, a later SAVED_MANUAL replay (e.g.
+        // reloading from refs) must not overwrite it.
+        r.record_merge("manual_stale", MergeRecord::SAVED_MANUAL);
+        assert_eq!(r.sha1.as_deref(), Some("manual_new"));
+    }
+
+    #[test]
+    fn blocked_flag_is_independent_of_merge_state() {
+        let mut r = MergeRecord::new();
+        assert!(!r.is_blocked());
+        r.record_blocked(true);
+        assert!(r.is_blocked());
+        r.record_merge("auto1", MergeRecord::NEW_AUTO);
+        assert!(r.is_blocked(), "recording a merge must not clear BLOCKED");
+        r.record_blocked(false);
+        assert!(!r.is_blocked());
+        assert!(r.is_known());
+    }
+
+    // -- Grid diagram codes -----------------------------------------------
+
+    #[test]
+    fn merge_state_code_matches_python_table() {
+        assert_eq!(merge_state_code(false, false, false), MERGE_UNKNOWN);
+        assert_eq!(merge_state_code(false, true, false), MERGE_UNKNOWN);
+        assert_eq!(merge_state_code(false, false, true), MERGE_BLOCKED);
+        assert_eq!(merge_state_code(true, false, true), MERGE_UNBLOCKED);
+        assert_eq!(merge_state_code(true, true, true), MERGE_UNBLOCKED);
+        assert_eq!(merge_state_code(true, false, false), MERGE_AUTOMATIC);
+        assert_eq!(merge_state_code(true, true, false), MERGE_MANUAL);
+    }
+
+    // -- Rect coordinate math ----------------------------------------------
+
+    #[test]
+    fn rect_full_has_zero_origin() {
+        let r = Rect::full(4, 5);
+        assert_eq!(r.abs(0, 0).unwrap(), (0, 0));
+        assert_eq!(r.abs(-1, -1).unwrap(), (3, 4));
+    }
+
+    #[test]
+    fn rect_sub_offsets_absolute_coordinates() {
+        let top = Rect::full(6, 6);
+        let sub = top.sub(2, 3, 1, 4); // origin (2,1), dims 3x4
+        assert_eq!(sub.abs(0, 0).unwrap(), (2, 1));
+        assert_eq!(sub.abs(2, 3).unwrap(), (4, 4));
+        assert_eq!(sub.abs(-1, -1).unwrap(), (4, 4));
+    }
+
+    #[test]
+    fn rect_to_local_round_trips_abs() {
+        let top = Rect::full(6, 6);
+        let sub = top.sub(2, 3, 1, 4);
+        let (a1, a2) = sub.abs(1, 2).unwrap();
+        assert_eq!(sub.to_local(a1, a2), Some((1, 2)));
+        // A point outside the sub-rect must not resolve.
+        assert_eq!(sub.to_local(0, 0), None);
+    }
+
+    #[test]
+    fn rect_out_of_bounds_index_errors() {
+        let r = Rect::full(3, 3);
+        assert!(r.abs(3, 0).is_err());
+        assert!(r.abs(0, -4).is_err());
+    }
+
+    // -- Grid + Rect merge-recording integration ---------------------------
+
+    #[test]
+    fn grid_auto_fill_micromerge_records_conflict_as_blocked() {
+        // Without a real git repo we can't exercise `automerge` itself, but
+        // we can verify the surrounding bookkeeping: a known grid with a
+        // pre-blocked cell must not be re-attempted, and record_blocked/
+        // record_merge interact correctly through a Rect.
+        let mut grid = Grid::new("test", 3, 3);
+        grid.get_mut(0, 0).record_merge("base", MergeRecord::NEW_MANUAL);
+        grid.get_mut(1, 0).record_merge("c1", MergeRecord::NEW_MANUAL);
+        grid.get_mut(0, 1).record_merge("c2", MergeRecord::NEW_MANUAL);
+
+        let full = Rect::full(3, 3);
+        assert!(!full.known(&grid, 1, 1).unwrap());
+        full.record_blocked(&mut grid, 1, 1, true).unwrap();
+        assert!(full.blocked(&grid, 1, 1).unwrap());
+
+        full.record_merge(&mut grid, 1, 1, "resolved", MergeRecord::NEW_MANUAL).unwrap();
+        assert!(full.known(&grid, 1, 1).unwrap());
+        // record_merge must not implicitly clear BLOCKED -- callers
+        // (Frontier::incorporate_merge) are responsible for that.
+        assert!(full.blocked(&grid, 1, 1).unwrap());
+    }
+}

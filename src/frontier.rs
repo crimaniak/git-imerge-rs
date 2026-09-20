@@ -511,3 +511,167 @@ impl Frontier {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::block::MergeRecord;
+
+    fn rect(len1: usize, len2: usize) -> Rect {
+        Rect { origin1: 0, origin2: 0, len1, len2 }
+    }
+
+    // -- find_first_false ---------------------------------------------------
+
+    #[test]
+    fn find_first_false_basic() {
+        let f = |i: usize| -> Result<bool> { Ok(i < 5) };
+        assert_eq!(find_first_false(0, 10, f).unwrap(), 5);
+        assert_eq!(find_first_false(0, 3, f).unwrap(), 3, "all-true range returns hi");
+        assert_eq!(find_first_false(6, 10, f).unwrap(), 6, "all-false range returns lo");
+    }
+
+    // -- normalized_blocks ---------------------------------------------------
+
+    #[test]
+    fn normalized_blocks_drops_contained_blocks() {
+        let big = rect(4, 4);
+        let small = rect(2, 2);
+        assert_eq!(normalized_blocks(vec![small, big]), vec![big]);
+    }
+
+    #[test]
+    fn normalized_blocks_keeps_staircase_blocks_sorted_by_len1() {
+        let a = rect(2, 5);
+        let b = rect(5, 2);
+        assert_eq!(normalized_blocks(vec![b, a]), vec![a, b]);
+    }
+
+    #[test]
+    fn normalized_blocks_drops_empty_blocks() {
+        let a = rect(0, 3);
+        let b = rect(3, 0);
+        let c = rect(2, 2);
+        assert_eq!(normalized_blocks(vec![a, b, c]), vec![c]);
+    }
+
+    // -- remove_failure ------------------------------------------------------
+
+    #[test]
+    fn remove_failure_shrinks_containing_block_both_ways() {
+        let block = rect(5, 5);
+        let result = remove_failure(&[block], 3, 3);
+        assert_eq!(result.len(), 2);
+        assert!(result.contains(&block.sub(0, 3, 0, 5)));
+        assert!(result.contains(&block.sub(0, 5, 0, 3)));
+    }
+
+    #[test]
+    fn remove_failure_at_first_row_only_shrinks_columns() {
+        let block = rect(5, 5);
+        // i1 == 1 means the "i1 > 1" shrink is skipped.
+        assert_eq!(remove_failure(&[block], 1, 3), vec![block.sub(0, 5, 0, 3)]);
+    }
+
+    #[test]
+    fn remove_failure_leaves_unrelated_blocks_untouched() {
+        let block = rect(3, 3);
+        // (5,5) is outside `block`'s bounds entirely.
+        assert_eq!(remove_failure(&[block], 5, 5), vec![block]);
+    }
+
+    // -- partition -------------------------------------------------------
+
+    #[test]
+    fn partition_splits_around_a_centered_target() {
+        let top = rect(6, 6);
+        let target = rect(3, 3);
+        let result = partition(top, &[target], target).unwrap();
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].0, top.sub(0, 3, 2, 4));
+        assert!(result[0].1.is_empty());
+        assert_eq!(result[1].0, top.sub(2, 4, 0, 3));
+        assert!(result[1].1.is_empty());
+    }
+
+    #[test]
+    fn partition_of_the_whole_top_yields_nothing() {
+        let top = rect(4, 4);
+        assert!(partition(top, &[top], top).unwrap().is_empty());
+    }
+
+    // -- boundary / blocker blocks --------------------------------------
+
+    #[test]
+    fn blocker_blocks_of_an_empty_frontier_is_the_whole_grid() {
+        let top = rect(4, 4);
+        let blockers = iter_blocker_blocks(top, &[]);
+        assert_eq!(blockers, vec![top]);
+    }
+
+    #[test]
+    fn blocker_blocks_shrink_around_a_full_width_outline() {
+        let top = rect(4, 4);
+        // Outlined across the full width (all of i2) but only the first
+        // two rows of i1: exactly one gap remains, from the outlined
+        // block's corner to top's far corner.
+        let outlined = top.sub(0, 2, 0, 4);
+        let blockers = iter_blocker_blocks(top, &[outlined]);
+        assert_eq!(blockers, vec![top.sub(1, 3, 0, 4)]);
+    }
+
+    // -- map_known_frontier (pure grid reconstruction, no git needed) ----
+
+    #[test]
+    fn map_known_frontier_reconstructs_staircase() {
+        let mut grid = Grid::new("t", 3, 3);
+        grid.get_mut(0, 0).record_merge("base", MergeRecord::NEW_MANUAL);
+        grid.get_mut(1, 0).record_merge("c10", MergeRecord::NEW_MANUAL);
+        grid.get_mut(2, 0).record_merge("c20", MergeRecord::NEW_MANUAL);
+        grid.get_mut(0, 1).record_merge("c01", MergeRecord::NEW_MANUAL);
+        grid.get_mut(0, 2).record_merge("c02", MergeRecord::NEW_MANUAL);
+        grid.get_mut(1, 1).record_merge("m11", MergeRecord::NEW_AUTO);
+        grid.get_mut(2, 1).record_merge("m21", MergeRecord::NEW_AUTO);
+        // (1,2) and (2,2) are left unknown.
+
+        let full = Rect::full(3, 3);
+        let (top, blocks) = map_known_frontier(&grid, full).unwrap();
+        assert_eq!(top, full);
+        // Row 0 is known on its own (a degenerate 1x3 sliver), and rows
+        // 0-2 x columns 0-1 form the real outlined 3x2 block covering the
+        // known (1,1)/(2,1) cells.
+        assert_eq!(blocks, vec![rect(1, 3), rect(3, 2)]);
+    }
+
+    #[test]
+    fn map_known_frontier_of_fresh_grid_has_no_real_progress() {
+        let mut grid = Grid::new("t", 3, 3);
+        grid.get_mut(0, 0).record_merge("base", MergeRecord::NEW_MANUAL);
+        grid.get_mut(1, 0).record_merge("c10", MergeRecord::NEW_MANUAL);
+        grid.get_mut(2, 0).record_merge("c20", MergeRecord::NEW_MANUAL);
+        grid.get_mut(0, 1).record_merge("c01", MergeRecord::NEW_MANUAL);
+        grid.get_mut(0, 2).record_merge("c02", MergeRecord::NEW_MANUAL);
+        // No interior cell is known.
+
+        let full = Rect::full(3, 3);
+        let (top, blocks) = map_known_frontier(&grid, full).unwrap();
+        // Every reconstructed block is a degenerate (zero-area) sliver
+        // along the known edges -- meaning the whole interior is still
+        // exactly one blocker region, not real progress.
+        assert!(blocks.iter().all(|b| b.area() == 0));
+        assert_eq!(iter_blocker_blocks(top, &blocks), vec![full]);
+    }
+
+    #[test]
+    fn full_frontier_is_complete_iff_vertex_known() {
+        let mut grid = Grid::new("t", 2, 2);
+        grid.get_mut(0, 0).record_merge("base", MergeRecord::NEW_MANUAL);
+        grid.get_mut(1, 0).record_merge("c1", MergeRecord::NEW_MANUAL);
+        grid.get_mut(0, 1).record_merge("c2", MergeRecord::NEW_MANUAL);
+        let frontier = Frontier::Full(Rect::full(2, 2));
+        assert!(!frontier.is_complete(&grid).unwrap());
+
+        grid.get_mut(1, 1).record_merge("vertex", MergeRecord::NEW_AUTO);
+        assert!(frontier.is_complete(&grid).unwrap());
+    }
+}
