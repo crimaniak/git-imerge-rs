@@ -50,6 +50,21 @@ any subcommand). Goals: `merge` (default), `rebase`, `rebase-with-history`,
 `border`, `border-with-history`, `border-with-history2`, `full`, `drop`,
 `revert` — see the original project's README for what each one produces.
 
+### Auto-resolving duplicate-patch conflicts
+
+If the same change was made independently on both branches (e.g. a hotfix
+commit that was cherry-picked or otherwise reproduced on each side), a plain
+`git merge` can still report a conflict there even though there's no real
+decision to make — either side's resolution is the same patch. git-imerge-rs
+detects this case (comparing the two branches' contributing commits via
+`git patch-id --stable`, the same primitive `git cherry`/`git rebase` use to
+recognize already-applied commits) and resolves it silently, recording the
+result exactly like any other successful automerge. Requires each side's
+contributing commit to be an ordinary, single-parent commit (merge commits
+are out of scope). Enabled by default; pass `--no-dedupe-patches` to
+`init`/`start`/`merge`/`rebase`/`drop`/`revert` to disable it (the choice is
+persisted with the imerge, so `continue`/`record`/`autofill` honor it too).
+
 ## Architecture
 
 The implementation is split the same way the algorithm naturally

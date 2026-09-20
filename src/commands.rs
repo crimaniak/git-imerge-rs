@@ -140,7 +140,7 @@ pub fn cmd_init(git: &Git, args: &InitArgs) -> Result<()> {
         .map_err(|e| hint_first_parent(e, args.first_parent))?;
 
     let mut ms = MergeState::initialize(
-        git, &name, &merge_base, &tip1, &commits1, &tip2, &commits2, &args.goal, None, args.manual, args.branch.as_deref(),
+        git, &name, &merge_base, &tip1, &commits1, &tip2, &commits2, &args.goal, None, args.manual, args.dedupe_patches, args.branch.as_deref(),
     )?;
     ms.save(git)?;
     maybe_set_default(git, &name)
@@ -161,7 +161,7 @@ pub fn cmd_start(git: &Git, args: &InitArgs) -> Result<()> {
         .map_err(|e| hint_first_parent(e, args.first_parent))?;
 
     let mut ms = MergeState::initialize(
-        git, &name, &merge_base, &tip1, &commits1, &tip2, &commits2, &args.goal, None, args.manual, args.branch.as_deref(),
+        git, &name, &merge_base, &tip1, &commits1, &tip2, &commits2, &args.goal, None, args.manual, args.dedupe_patches, args.branch.as_deref(),
     )?;
     ms.save(git)?;
     maybe_set_default(git, &name)?;
@@ -209,7 +209,7 @@ pub fn cmd_merge(git: &Git, args: &MergeArgs) -> Result<()> {
     };
 
     let mut ms = MergeState::initialize(
-        git, &name, &merge_base, &tip1, &commits1, &tip2, &commits2, &args.goal, None, args.manual, branch.as_deref(),
+        git, &name, &merge_base, &tip1, &commits1, &tip2, &commits2, &args.goal, None, args.manual, args.dedupe_patches, branch.as_deref(),
     )?;
     ms.save(git)?;
     maybe_set_default(git, &name)?;
@@ -258,7 +258,7 @@ pub fn cmd_rebase(git: &Git, args: &RebaseArgs) -> Result<()> {
     };
 
     let mut ms = MergeState::initialize(
-        git, &name, &merge_base, &tip1, &commits1, &tip2, &commits2, &args.goal, None, args.manual, branch.as_deref(),
+        git, &name, &merge_base, &tip1, &commits1, &tip2, &commits2, &args.goal, None, args.manual, args.dedupe_patches, branch.as_deref(),
     )?;
     ms.save(git)?;
     maybe_set_default(git, &name)?;
@@ -322,7 +322,7 @@ fn cmd_drop_or_revert(git: &Git, args: &RangeArgs, goal: &str) -> Result<()> {
     };
 
     let mut ms = MergeState::initialize(
-        git, &name, &merge_base, &tip1, &commits1, &tip2, &commits2, goal, goalopts, args.manual, branch.as_deref(),
+        git, &name, &merge_base, &tip1, &commits1, &tip2, &commits2, goal, goalopts, args.manual, args.dedupe_patches, branch.as_deref(),
     )?;
     ms.save(git)?;
     maybe_set_default(git, &name)?;

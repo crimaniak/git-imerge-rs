@@ -305,3 +305,89 @@ fn diagram_reports_key_and_tip_names() {
     assert!(text.contains("Key:"));
     assert!(text.contains("no merge recorded"));
 }
+
+/// Build a repo with two branches that each insert the *same* new line
+/// (`SHARED`) independently, except one side has a trailing space --
+/// `git patch-id --stable` normalizes that away (so the two single-commit
+/// patches are considered equal), while plain `git merge` still treats
+/// "SHARED" and "SHARED " as different lines and genuinely conflicts.
+/// This is the minimal reproduction of "the same change was made
+/// independently on both branches" that the patch-dedup feature targets.
+fn setup_same_patch_different_whitespace_repo() -> Repo {
+    let repo = Repo::new();
+    repo.write("f.txt", "alpha\nbeta\ngamma\n");
+    repo.commit_all("base");
+
+    repo.git(&["checkout", "-q", "-b", "left"]);
+    repo.write("f.txt", "alpha\nbeta\nSHARED\ngamma\n");
+    repo.commit_all("L1 insert SHARED");
+
+    repo.git(&["checkout", "-q", "main"]);
+    repo.git(&["checkout", "-q", "-b", "right"]);
+    repo.write("f.txt", "alpha\nbeta\nSHARED \ngamma\n");
+    repo.commit_all("R1 insert SHARED with trailing space");
+
+    repo.git(&["checkout", "-q", "left"]);
+    repo
+}
+
+#[test]
+fn patch_dedup_auto_resolves_conflict_from_independently_applied_change() {
+    let repo = setup_same_patch_different_whitespace_repo();
+    let out = repo.imerge_ok(&["merge", "--name", "dedup1", "right"]);
+    assert!(
+        stderr(&out).contains("Merge is complete!"),
+        "expected patch-id dedup to auto-resolve the conflict silently, got: {}",
+        stderr(&out)
+    );
+    repo.imerge_ok(&["finish", "--name", "dedup1"]);
+    assert_eq!(repo.git(&["for-each-ref", "refs/imerge"]), "");
+}
+
+#[test]
+fn no_dedupe_patches_flag_disables_auto_resolution() {
+    let repo = setup_same_patch_different_whitespace_repo();
+    let out = repo.imerge_ok(&["merge", "--name", "dedup2", "--no-dedupe-patches", "right"]);
+    let msg = stderr(&out);
+    assert!(
+        msg.contains("conflict") && msg.contains("git-imerge continue"),
+        "expected --no-dedupe-patches to require manual resolution, got: {msg}"
+    );
+    let file = std::fs::read_to_string(repo.path().join("f.txt")).unwrap();
+    assert!(file.contains("<<<<<<<"), "expected conflict markers, got: {file}");
+}
+
+#[test]
+fn patch_dedup_skips_merge_commits() {
+    // Same reproduction as above, except the "left" side's contribution is
+    // a merge commit (>1 parent) rather than an ordinary commit -- the
+    // dedup guard must refuse to compute a patch-id for it and fall
+    // through to a real, manually-resolved conflict even though dedup is
+    // enabled by default.
+    let repo = Repo::new();
+    repo.write("f.txt", "alpha\nbeta\ngamma\n");
+    repo.commit_all("base");
+
+    repo.git(&["checkout", "-q", "-b", "left-side"]);
+    repo.write("f.txt", "alpha\nbeta\nSHARED\ngamma\n");
+    repo.commit_all("side: insert SHARED");
+
+    repo.git(&["checkout", "-q", "main"]);
+    repo.git(&["checkout", "-q", "-b", "left"]);
+    repo.git(&["merge", "--no-ff", "-m", "L1 merge insert SHARED", "left-side"]);
+
+    repo.git(&["checkout", "-q", "main"]);
+    repo.git(&["checkout", "-q", "-b", "right"]);
+    repo.write("f.txt", "alpha\nbeta\nSHARED \ngamma\n");
+    repo.commit_all("R1 insert SHARED with trailing space");
+
+    repo.git(&["checkout", "-q", "left"]);
+    let out = repo.imerge_ok(&["merge", "--name", "guard1", "right"]);
+    let msg = stderr(&out);
+    assert!(
+        msg.contains("conflict") && msg.contains("git-imerge continue"),
+        "expected a merge-commit contributor to bypass patch-id dedup, got: {msg}"
+    );
+    let file = std::fs::read_to_string(repo.path().join("f.txt")).unwrap();
+    assert!(file.contains("<<<<<<<"), "expected conflict markers, got: {file}");
+}

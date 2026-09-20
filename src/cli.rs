@@ -68,6 +68,11 @@ pub struct InitArgs {
     /// Ask the user to complete all merges manually
     #[arg(long)]
     pub manual: bool,
+    /// Disable automatic resolution of conflicts caused by the same patch
+    /// having been independently applied to both branches (e.g. a
+    /// cherry-picked hotfix), as detected via `git patch-id --stable`
+    #[arg(long = "no-dedupe-patches", action = clap::ArgAction::SetFalse)]
+    pub dedupe_patches: bool,
     /// Handle only first-parent commits (required if history is nonlinear)
     #[arg(long)]
     pub first_parent: bool,
@@ -85,6 +90,11 @@ pub struct MergeArgs {
     pub branch: Option<String>,
     #[arg(long)]
     pub manual: bool,
+    /// Disable automatic resolution of conflicts caused by the same patch
+    /// having been independently applied to both branches (e.g. a
+    /// cherry-picked hotfix), as detected via `git patch-id --stable`
+    #[arg(long = "no-dedupe-patches", action = clap::ArgAction::SetFalse)]
+    pub dedupe_patches: bool,
     #[arg(long, hide = true, default_value_t = true, action = clap::ArgAction::SetTrue)]
     pub first_parent: bool,
     pub tip2: String,
@@ -100,6 +110,11 @@ pub struct RebaseArgs {
     pub branch: Option<String>,
     #[arg(long)]
     pub manual: bool,
+    /// Disable automatic resolution of conflicts caused by the same patch
+    /// having been independently applied to both branches (e.g. a
+    /// cherry-picked hotfix), as detected via `git patch-id --stable`
+    #[arg(long = "no-dedupe-patches", action = clap::ArgAction::SetFalse)]
+    pub dedupe_patches: bool,
     #[arg(long, hide = true, default_value_t = true, action = clap::ArgAction::SetTrue)]
     pub first_parent: bool,
     /// The tip of the branch onto which the current branch should be rebased
@@ -114,6 +129,11 @@ pub struct RangeArgs {
     pub branch: Option<String>,
     #[arg(long)]
     pub manual: bool,
+    /// Disable automatic resolution of conflicts caused by the same patch
+    /// having been independently applied to both branches (e.g. a
+    /// cherry-picked hotfix), as detected via `git patch-id --stable`
+    #[arg(long = "no-dedupe-patches", action = clap::ArgAction::SetFalse)]
+    pub dedupe_patches: bool,
     #[arg(long, default_value_t = true, action = clap::ArgAction::SetTrue)]
     pub first_parent: bool,
     /// The commit or range of commits ("commit" or "commit..commit")

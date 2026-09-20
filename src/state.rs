@@ -32,6 +32,10 @@ pub const ALLOWED_GOALS: &[&str] = &[
 #[allow(dead_code)]
 pub const DEFAULT_GOAL: &str = "merge";
 
+fn default_true() -> bool {
+    true
+}
+
 #[derive(Serialize, Deserialize, Clone, Default, PartialEq, Eq, Debug)]
 pub struct GoalOpts {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -52,6 +56,8 @@ pub struct StateDict {
     pub goalopts: Option<GoalOpts>,
     #[serde(default)]
     pub manual: bool,
+    #[serde(default = "default_true")]
+    pub dedupe_patches: bool,
     #[serde(default)]
     pub branch: Option<String>,
 }
@@ -124,11 +130,13 @@ impl MergeState {
         goal: &str,
         goalopts: Option<GoalOpts>,
         manual: bool,
+        dedupe_patches: bool,
         branch: String,
     ) -> MergeState {
         let len1 = commits1.len() + 1;
         let len2 = commits2.len() + 1;
         let mut grid = Grid::new(name, len1, len2);
+        grid.dedupe_patches = dedupe_patches;
         grid.get_mut(0, 0).record_merge(merge_base, source);
         for (i1, c) in commits1.iter().enumerate() {
             grid.get_mut(i1 + 1, 0).record_merge(c, source);
@@ -160,6 +168,7 @@ impl MergeState {
         goal: &str,
         goalopts: Option<GoalOpts>,
         manual: bool,
+        dedupe_patches: bool,
         branch: Option<&str>,
     ) -> Result<MergeState> {
         git.verify_imerge_name_available(name)?;
@@ -184,6 +193,7 @@ impl MergeState {
             goal,
             goalopts,
             manual,
+            dedupe_patches,
             branch,
         ))
     }
@@ -266,6 +276,7 @@ impl MergeState {
             &state.goal,
             state.goalopts.clone(),
             state.manual,
+            state.dedupe_patches,
             branch,
         );
 
@@ -766,6 +777,7 @@ impl MergeState {
             goal: self.goal.clone(),
             goalopts: self.goalopts.clone(),
             manual: self.manual,
+            dedupe_patches: self.grid.dedupe_patches,
             branch: Some(self.branch.clone()),
         };
         git.write_imerge_state_dict(&name, &state)

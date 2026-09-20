@@ -181,6 +181,11 @@ pub struct Grid {
     pub name: String,
     pub len1: usize,
     pub len2: usize,
+    /// Whether a conflict caused by the same patch having been
+    /// independently applied to both branches (detected via `git
+    /// patch-id`) should be auto-resolved instead of surfaced to the user.
+    /// See [`Grid::automerge_with_dedup`].
+    pub dedupe_patches: bool,
     data: Vec<Vec<MergeRecord>>,
 }
 
@@ -190,6 +195,7 @@ impl Grid {
             name: name.into(),
             len1,
             len2,
+            dedupe_patches: true,
             data: (0..len1).map(|_| (0..len2).map(|_| MergeRecord::new()).collect()).collect(),
         }
     }
@@ -208,6 +214,42 @@ impl Grid {
 
     pub fn is_blocked(&self, i1: usize, i2: usize) -> bool {
         self.data[i1][i2].is_blocked()
+    }
+
+    /// Attempt `git.automerge`; on conflict, if `self.dedupe_patches` and
+    /// the two *original* branch commits that reach this cell
+    /// (`self.get(i1,0)` / `self.get(0,i2)` -- this pairing is invariant
+    /// regardless of which specific commits are actually passed as
+    /// `commit1`/`commit2`, since the grid's definition is "commits1 up to
+    /// i1" x "commits2 up to i2") are both ordinary (single-parent)
+    /// commits with matching `git patch-id --stable`, retry with `-X ours`
+    /// instead of surfacing a real conflict. Fully silent either way -- a
+    /// dedup-resolved merge is recorded exactly like any other successful
+    /// automerge.
+    pub fn automerge_with_dedup(
+        &self,
+        git: &Git,
+        i1: usize,
+        i2: usize,
+        commit1: &str,
+        commit2: &str,
+        msg: Option<&str>,
+    ) -> Result<AutomergeOutcome> {
+        match git.automerge(commit1, commit2, msg)? {
+            s @ AutomergeOutcome::Success(_) => Ok(s),
+            AutomergeOutcome::Conflict => {
+                if !self.dedupe_patches {
+                    return Ok(AutomergeOutcome::Conflict);
+                }
+                let (Some(orig1), Some(orig2)) = (self.get(i1, 0).sha1.clone(), self.get(0, i2).sha1.clone()) else {
+                    return Ok(AutomergeOutcome::Conflict);
+                };
+                match (git.patch_id(&orig1)?, git.patch_id(&orig2)?) {
+                    (Some(a), Some(b)) if a == b => git.automerge_prefer_ours(commit1, commit2, msg),
+                    _ => Ok(AutomergeOutcome::Conflict),
+                }
+            }
+        }
     }
 
     /// The area of the grid excluding the known edges (row 0 / column 0).
@@ -350,7 +392,7 @@ impl Rect {
         eprint!("Attempting automerge of {oi1}-{oi2}...");
         let c1 = self.sha1(grid, i1, 0)?.expect("row-0 commit must be known");
         let c2 = self.sha1(grid, 0, i2)?.expect("column-0 commit must be known");
-        match git.automerge(&c1, &c2, None)? {
+        match grid.automerge_with_dedup(git, oi1, oi2, &c1, &c2, None)? {
             AutomergeOutcome::Success(_) => {
                 eprintln!("success.");
                 Ok(true)
@@ -375,7 +417,7 @@ impl Rect {
         let logmsg = format!("imerge '{}': automatic merge {oi1}-{oi2}", grid.name);
         let above = self.sha1(grid, i1 as isize - 1, i2)?.expect("(i1-1,i2) must be known");
         let left = self.sha1(grid, i1, i2 as isize - 1)?.expect("(i1,i2-1) must be known");
-        match git.automerge(&left, &above, Some(&logmsg))? {
+        match grid.automerge_with_dedup(git, oi1, oi2, &left, &above, Some(&logmsg))? {
             AutomergeOutcome::Conflict => {
                 eprintln!("conflict.");
                 self.record_blocked(grid, i1, i2, true)?;
@@ -422,7 +464,7 @@ impl Rect {
             let (oi1, oi2) = self.abs(i1 as isize, i2 as isize)?;
             eprint!("{}", label.replace("{i1}", &oi1.to_string()).replace("{i2}", &oi2.to_string()));
             let logmsg = format!("imerge '{}': automatic merge {oi1}-{oi2}", grid.name);
-            match git.automerge(commit1, commit2, Some(&logmsg))? {
+            match grid.automerge_with_dedup(git, oi1, oi2, commit1, commit2, Some(&logmsg))? {
                 AutomergeOutcome::Conflict => {
                     eprintln!("unexpected conflict.  Backtracking...");
                     Err(ImergeError::UnexpectedMergeFailure {

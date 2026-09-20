@@ -5,6 +5,7 @@
 //! conflict detection, so we shell out to the actual `git` binary rather
 //! than reimplementing merge/commit-tree/etc. with a library.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::io::Write;
 use std::process::{Command, Stdio};
@@ -12,6 +13,10 @@ use std::process::{Command, Stdio};
 use crate::error::{ImergeError, Result};
 
 pub const BRANCH_PREFIX: &str = "refs/heads/";
+
+/// The well-known empty-tree object, present in every git repository. Used
+/// as the "parent" when diffing a root commit for `patch_id`.
+pub const EMPTY_TREE_SHA1: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 
 /// Author/committer metadata to inject into a `git commit-tree` subprocess's
 /// environment (`GIT_AUTHOR_NAME`/`GIT_AUTHOR_EMAIL`/`GIT_AUTHOR_DATE`).
@@ -22,11 +27,19 @@ pub enum AutomergeOutcome {
     Conflict,
 }
 
-pub struct Git;
+pub struct Git {
+    /// Memoized `git patch-id --stable` results, keyed by commit SHA-1.
+    /// `None` means "not eligible" (a merge commit). Patch-id is a
+    /// per-commit property independent of which imerge is asking, and the
+    /// same commit is checked against every cell in its row/column, so
+    /// caching here (rather than per-`Grid`) avoids redundant subprocess
+    /// calls across the whole run.
+    patch_id_cache: RefCell<HashMap<String, Option<String>>>,
+}
 
 impl Git {
     pub fn new() -> Self {
-        Git
+        Git { patch_id_cache: RefCell::new(HashMap::new()) }
     }
 
     // -- low-level process helpers -----------------------------------
@@ -395,6 +408,52 @@ impl Git {
     /// comment: git-imerge does so many speculative merges that rerere
     /// would either get confused or pollute its cache).
     pub fn automerge(&self, commit1: &str, commit2: &str, msg: Option<&str>) -> Result<AutomergeOutcome> {
+        self.automerge_with_strategy(commit1, commit2, msg, &[], &[])
+    }
+
+    /// Like [`automerge`](Self::automerge), but resolves any conflicting
+    /// hunks in favor of `commit1` (`-X ours`). Only ever called after a
+    /// plain `automerge` has already conflicted *and* `patch_id` has
+    /// confirmed the two branch commits responsible for this grid cell are
+    /// patch-id-identical, single-parent commits -- in that case either
+    /// side's resolution of the conflicting hunk is the same text, so
+    /// preferring one deterministically is safe.
+    ///
+    /// Deliberately bypasses `.gitattributes`-configured custom merge
+    /// drivers (`merge=<name>`) for this one call: `-X <strategy-option>`
+    /// is specific to git's own recursive/ort merge strategy and is
+    /// silently ignored by a custom driver, which takes over content
+    /// resolution *before* strategy options would apply and has no way to
+    /// know "prefer ours" is even meant for it. Since we've already
+    /// established via `patch_id` that this conflict is a false positive
+    /// (the same patch on both sides), we don't need -- or want -- any
+    /// driver's semantic understanding here; falling back to git's native,
+    /// `-X`-aware engine for just this narrow, pre-verified-safe retry is
+    /// the correct choice, not a workaround.
+    pub fn automerge_prefer_ours(&self, commit1: &str, commit2: &str, msg: Option<&str>) -> Result<AutomergeOutcome> {
+        let attrs_path = Self::empty_attributes_file()?;
+        let attrs_opt = format!("core.attributesFile={}", attrs_path.display());
+        self.automerge_with_strategy(commit1, commit2, msg, &["-c", &attrs_opt], &["-X", "ours"])
+    }
+
+    /// Path to a real, guaranteed-empty attributes file (a genuine file
+    /// rather than `/dev/null`/`NUL`, for portability), used to disable
+    /// `.gitattributes` processing for one `git` invocation via `-c
+    /// core.attributesFile=<path>`.
+    fn empty_attributes_file() -> Result<std::path::PathBuf> {
+        let path = std::env::temp_dir().join(format!("git-imerge-empty-attributes-{}", std::process::id()));
+        std::fs::write(&path, "")?;
+        Ok(path)
+    }
+
+    fn automerge_with_strategy(
+        &self,
+        commit1: &str,
+        commit2: &str,
+        msg: Option<&str>,
+        global_opts: &[&str],
+        extra: &[&str],
+    ) -> Result<AutomergeOutcome> {
         // Silent: matches upstream's `call_silently`, avoiding a flood of
         // "leaving N commits behind" detached-HEAD advice on every
         // speculative merge.
@@ -405,7 +464,10 @@ impl Git {
                 String::from_utf8_lossy(&checkout_out.stderr).trim()
             )));
         }
-        let mut args = vec!["-c", "rerere.enabled=false", "merge"];
+        let mut args = vec!["-c", "rerere.enabled=false"];
+        args.extend_from_slice(global_opts);
+        args.push("merge");
+        args.extend_from_slice(extra);
         if let Some(msg) = msg {
             args.push("-m");
             args.push(msg);
@@ -602,6 +664,39 @@ impl Git {
     pub fn get_commit_parents(&self, commit: &str) -> Result<Vec<String>> {
         let out = self.run(&["--no-pager", "log", "--no-walk", "--pretty=format:%P", commit])?;
         Ok(out.split_whitespace().map(|s| s.to_string()).collect())
+    }
+
+    /// `git patch-id --stable` of the diff introduced by a single ordinary
+    /// (0- or 1-parent) commit, used to recognize when the same underlying
+    /// change was made independently on two branches (e.g. a cherry-picked
+    /// hotfix). Returns `Ok(None)` -- never an error -- for a merge commit
+    /// (out of scope for this heuristic); memoized per commit SHA-1, since
+    /// the same commit is checked against every cell in its row/column.
+    pub fn patch_id(&self, commit: &str) -> Result<Option<String>> {
+        if let Some(cached) = self.patch_id_cache.borrow().get(commit) {
+            return Ok(cached.clone());
+        }
+        let parents = self.get_commit_parents(commit)?;
+        let result = if parents.len() > 1 {
+            None
+        } else {
+            let base = parents.first().map(String::as_str).unwrap_or(EMPTY_TREE_SHA1);
+            // Deliberately not `self.run(...)`: that helper trims *all*
+            // trailing newlines, which would strip the newline patch-id
+            // needs to recognize the diff's final line.
+            let diff_out = self.output(&["diff", base, commit])?;
+            if !diff_out.status.success() {
+                return Err(ImergeError::Failure(format!(
+                    "'git diff {base} {commit}' failed: {}",
+                    String::from_utf8_lossy(&diff_out.stderr).trim()
+                )));
+            }
+            let diff = String::from_utf8_lossy(&diff_out.stdout).to_string();
+            let out = self.run_stdin(&["patch-id", "--stable"], &diff)?;
+            out.split_whitespace().next().map(str::to_string)
+        };
+        self.patch_id_cache.borrow_mut().insert(commit.to_string(), result.clone());
+        Ok(result)
     }
 
     pub fn get_tree(&self, arg: &str) -> Result<String> {
